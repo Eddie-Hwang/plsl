@@ -5,6 +5,7 @@ from omegaconf import OmegaConf
 from pytorch_lightning.callbacks import Callback                                 
 from pytorch_lightning.utilities import rank_zero_info
 
+
 # Here you can create your own callback to save model outputs
 class DummyCallback(Callback):
     def __init__(self):

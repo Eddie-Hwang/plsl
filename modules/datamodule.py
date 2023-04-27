@@ -1,7 +1,7 @@
 import pytorch_lightning as pl
 from torch.utils.data import DataLoader
 from modules.data import custom_collate
-from modules.helpers import *
+from modules.utils import instantiate_from_config
 
 
 # Do not modify

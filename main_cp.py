@@ -1,20 +1,23 @@
 import argparse
+import copy
 import datetime
 import glob
-import importlib
 import os
 import sys
 
-import pytorch_lightning as pl
+from einops import rearrange
 from omegaconf import OmegaConf
-from packaging import version
 from pytorch_lightning import seed_everything
-from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
+from pytorch_lightning.callbacks import (EarlyStopping, LearningRateMonitor,
+                                         ModelCheckpoint)
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.trainer import Trainer
-from modules.utils import instantiate_from_config
-from modules.callbacks import SetupCallback
 
+from modules.callbacks import KeypointsLogger, SetupCallback
+from modules.helpers import *
+
+# torch.set_float32_matmul_precision('high')
+# os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
 
 def get_parser(**parser_kwargs):
@@ -165,7 +168,10 @@ if __name__=='__main__':
     data = instantiate_from_config(config.data)
     data.setup()
     
+    total_steps = (len(data.datasets["train"]) // data.batch_size) * opt.max_epochs
+    
     # initiate model
+    config.model.params.noise_config.params["total_steps"] = total_steps
     model = instantiate_from_config(config.model)
 
     # update learning rate
@@ -188,7 +194,7 @@ if __name__=='__main__':
         opt.callbacks.append(SetupCallback(resume=opt.resume, now=now, logdir=logdir, ckptdir=ckptdir, 
                                         cfgdir=cfgdir, config=config, lightning_config=lightning_config))
         
-        opt.callbacks.append(EarlyStopping(monitor=model.monitor, verbose=True, patience=10))
+        opt.callbacks.append(EarlyStopping(monitor=model.monitor, verbose=True, patience=50))
 
     # lightning trainer
     trainer = Trainer.from_argparse_args(opt)
