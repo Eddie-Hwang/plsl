@@ -57,31 +57,13 @@ def get_parser(**parser_kwargs):
         default=False,
     )
     parser.add_argument(
-        '-d',
-        '--devices',
-        # nargs="+",
-        # type=int,
-        default='auto'
-    )
-    parser.add_argument(
-        '-a',
-        '--accelerator',
-        default='cpu'
-    )
-    parser.add_argument(
-        '-e',
-        '--max_epochs',
-        type=int,
-        default=0,
-    )
-    parser.add_argument(
-        "--strategy",
-        type=str,
-        default=None
-    )
-    parser.add_argument(
+        "-n",
         "--name",
-        default=None
+        type=str,
+        const=True,
+        default="",
+        nargs="?",
+        help="postfix for logdir",
     )
     parser.add_argument(
         "--postfix",
@@ -92,7 +74,8 @@ def get_parser(**parser_kwargs):
         "-l",
         "--logdir",
         type=str,
-        default="logs"
+        default="logs",
+        help="directory for logging dat shit"
     )
     parser.add_argument(
         "-r",
@@ -109,14 +92,15 @@ def get_parser(**parser_kwargs):
         type=bool,
         default=True
     )
-    parser.add_argument(
-        "--check_val_every_n_epoch",
-        type=int,
-        default=1
-    )
-
     return parser
-                    
+
+
+def nondefault_trainer_args(opt):
+    parser = argparse.ArgumentParser()
+    parser = Trainer.add_argparse_args(parser)
+    args = parser.parse_args([])
+    return [k for k in vars(args) if hasattr(opt, k) and getattr(opt, k) != getattr(args, k)]
+
 
 if __name__=='__main__':
     now = datetime.datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
@@ -124,8 +108,16 @@ if __name__=='__main__':
     sys.path.append(os.getcwd())
     
     parser = get_parser()
-    opt = parser.parse_args()
-
+    
+    opt, unknown = parser.parse_known_args()
+    
+    if opt.name and opt.resume:
+        raise ValueError(
+            "-n/--name and -r/--resume cannot be specified both."
+            "If you want to resume training in a new log folder, "
+            "use -n/--name in combination with --resume_from_checkpoint"
+        )
+    
     if opt.resume:
         if not os.path.exists(opt.resume):
             raise ValueError(f"Cannot fine {opt.resume}")
@@ -137,6 +129,7 @@ if __name__=='__main__':
         base_configs = sorted(glob.glob(os.path.join(logdir, "configs/*.yaml")))
         opt.config = base_configs + opt.config
         nowname = logdir.split("/")[-1]
+    
     else:
         if opt.name:
             name = "_" + opt.name
@@ -152,50 +145,88 @@ if __name__=='__main__':
     ckptdir = os.path.join(logdir, "checkpoints")
     cfgdir = os.path.join(logdir, "configs")
 
-    # random seed
+    # Random seed
     seed_everything(opt.seed)
 
-    # model config
+    # Model config
     configs = [OmegaConf.load(cfg) for cfg in opt.config]
     config = OmegaConf.merge(*configs)
+    lightning_config = config.pop("lightning", OmegaConf.create())
     
-    lightning_config = OmegaConf.create(vars(opt))
+    trainer_config = lightning_config.get("trainer", OmegaConf.create())
+
+    for k in nondefault_trainer_args(opt):
+        trainer_config[k] = getattr(opt, k)
+    if opt.fast_dev_run:
+        trainer_config["fast_dev_run"] = True
     
-    # initiate data
+    trainer_opt = argparse.Namespace(**trainer_config)
+    lightning_config.trainer = trainer_config
+    
+    # Instantiate data
     data = instantiate_from_config(config.data)
     data.setup()
     
-    # initiate model
+    # Instantiate model
     model = instantiate_from_config(config.model)
 
     # update learning rate
     batch_size = config.data.params.batch_size
     base_lr_rate = config.model.params.base_learning_rate
+    
+    # TODO: scale_lr set relatively high value and this should need to be fixed
     if opt.scale_lr:
         model.learning_rate = batch_size * base_lr_rate
         print(f"[INFO] Setting learning rate to {model.learning_rate:.2e} = {batch_size} (batchsize) * {base_lr_rate:.2e} (base_lr)")
+        
+    # Currently available loggers
+    default_logger_cfgs = {
+            "wandb": {
+                "target": "pytorch_lightning.loggers.WandbLogger",
+                "params": {
+                    "name": nowname,
+                    "save_dir": logdir,
+                    # "offline": opt.debug,
+                    "id": nowname,
+                }
+            },
+            "testtube": {
+                "target": "pytorch_lightning.loggers.TestTubeLogger",
+                "params": {
+                    "name": "testtube",
+                    "save_dir": logdir,
+                }
+            },
+            "tensorboard": {
+                "target": "pytorch_lightning.loggers.TensorBoardLogger",
+                "params": {
+                    "version": nowname,
+                    "save_dir": logdir
+                }
+            }
+        }
     
+    default_logger_cfg = default_logger_cfgs["tensorboard"]
+    logger_cfg = OmegaConf.create()
+    logger_cfg = OmegaConf.merge(default_logger_cfg, logger_cfg)
+
     if not(opt.fast_dev_run):
-        # initiate logger
-        opt.logger = TensorBoardLogger(save_dir=logdir, version=nowname)
+        trainer_opt.logger = instantiate_from_config(logger_cfg)
         
-        # initiate callbacks
-        opt.callbacks = [instantiate_from_config(config.custom_callback[callback]) for callback in config.custom_callback.keys()]
+        trainer_opt.callbacks = [instantiate_from_config(lightning_config.callback[callback]) for callback in lightning_config.callback.keys()]
         
-        opt.callbacks.append(ModelCheckpoint(dirpath=ckptdir, filename="{epoch:06}", 
+        trainer_opt.callbacks.append(ModelCheckpoint(dirpath=ckptdir, filename="{epoch:06}", 
                                             monitor=model.monitor, save_top_k=3))
         
-        opt.callbacks.append(SetupCallback(resume=opt.resume, now=now, logdir=logdir, ckptdir=ckptdir, 
+        trainer_opt.callbacks.append(SetupCallback(resume=opt.resume, now=now, logdir=logdir, ckptdir=ckptdir, 
                                         cfgdir=cfgdir, config=config, lightning_config=lightning_config))
         
-        opt.callbacks.append(EarlyStopping(monitor=model.monitor, verbose=True, patience=10))
-
+        # opt.callbacks.append(EarlyStopping(monitor=model.monitor, verbose=True, patience=50))
+        
     # lightning trainer
-    trainer = Trainer.from_argparse_args(opt)
+    trainer = Trainer.from_argparse_args(trainer_opt)
     
     if opt.train:
         trainer.fit(model, data)
     if not opt.no_test:
         trainer.test(model, data)
-    
-    

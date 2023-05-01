@@ -117,7 +117,7 @@ class TransformerT2G(pl.LightningModule):
     def decode(self, enc_outs, trg, mask):
         embed = self.trg_emb(trg)
         embed = self.pos_encoding(embed)
-        ar_mask = nn.Transformer.generate_square_subsequent_mask(trg.shape[1])
+        ar_mask = nn.Transformer.generate_square_subsequent_mask(trg.shape[1]).to(self.device)
 
         outs = self.decoder(embed, enc_outs, tgt_mask=ar_mask, tgt_key_padding_mask=~mask)
         

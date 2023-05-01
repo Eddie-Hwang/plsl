@@ -23,7 +23,6 @@ model:
         initial_noise_std: 0.5
         final_noise_std: 0.1
         total_steps: 100000 # TODO
-
 data:
   target: modules.datamodule.DataModuleFromConfig
   params:
@@ -47,3 +46,22 @@ data:
         text_file_path: /data/sl_datasets/phoenix14t/data/ProgressiveTransformersSLP/test.text
         gloss_file_path: /data/sl_datasets/phoenix14t/data/ProgressiveTransformersSLP/test.gloss
         keypoint_file_path: /data/sl_datasets/phoenix14t/data/ProgressiveTransformersSLP/test.skels 
+lightning:
+  callback:
+    keypoint_logger_callback:
+      target: modules.callbacks.KeypointsLogger
+      params:
+        max_keypoints: 1
+        save_and_sample_every: 1
+    cuda_callback:
+      target: modules.callbacks.CUDACallback
+    learning_rate_logger:
+      target: main.LearningRateMonitor
+      params:
+        logging_interval: step 
+  trainer:
+    accumulate_grad_batch: 2
+    accelerator: gpu
+    devices: auto
+    max_epochs: 2
+    overfit_batches: 0.1
