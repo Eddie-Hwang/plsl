@@ -42,7 +42,8 @@ class DataModuleFromConfig(pl.LightningDataModule):
             dataset=self.datasets['valid'], 
             batch_size=self.batch_size,
             num_workers=self.num_workers,
-            collate_fn=custom_collate
+            shuffle=False,
+            collate_fn=custom_collate,
         )
 
     def _test_dataloader(self):
@@ -50,5 +51,6 @@ class DataModuleFromConfig(pl.LightningDataModule):
             dataset=self.datasets['test'], 
             batch_size=self.batch_size,
             num_workers=self.num_workers,
+            shuffle=False,
             collate_fn=custom_collate
         ) 

@@ -7,9 +7,16 @@ from pytorch_lightning.utilities import rank_zero_info
 
 
 # Here you can create your own callback to save model outputs
-class DummyCallback(Callback):
+class T2GCallback(Callback):
     def __init__(self):
         super().__init__()
+
+    def log_local(self, save_dir, split, ):
+        return
+    
+    
+
+    
 
 
 # Do not modify

@@ -8,7 +8,7 @@ from torch.nn.utils.rnn import pad_sequence
 import torch.nn.functional as F
 import os
 import numpy as np
-from nltk.translate.bleu_score import corpus_bleu
+import evaluate
 from einops import rearrange
 
 
@@ -28,15 +28,13 @@ def create_mask(seq_lengths, device="cpu"):
     return mask.bool()
 
 
-def get_blues(reference_string_list, generated_string_list):
-    # Calculate BLEU scores for n-grams from 1 to 4
-    weights_list = [(1, 0, 0, 0), (0.5, 0.5, 0, 0), (0.33, 0.33, 0.33, 0), (0.25, 0.25, 0.25, 0.25)]
-    bleu_scores_dict = {}
-    for i, weights in enumerate(weights_list):
-        bleu_score = corpus_bleu([[ref] for ref in reference_string_list], generated_string_list, weights=weights)
-        bleu_scores_dict["valid/bleu{}".format(i+1)] = bleu_score
-    return bleu_scores_dict
-
+def get_blues(generated_string_list, reference_string_list, split="train"):
+    metric = evaluate.load("sacrebleu")
+    results = metric.compute(predictions=generated_string_list, references=reference_string_list)
+    bleu_score_dict = {}
+    for i, score in enumerate(results["precisions"]):
+        bleu_score_dict[f"{split}/bleu-{i+1}"] = score
+    return bleu_score_dict
 
 class TransformerT2G(pl.LightningModule):
     def __init__(
@@ -56,6 +54,7 @@ class TransformerT2G(pl.LightningModule):
         vocab_freq=1,
         emb_dim=512,
         base_learning_rate=0.001, 
+        label_smoothing=0.1,
         **kwargs
     ):
         super().__init__()
@@ -65,6 +64,7 @@ class TransformerT2G(pl.LightningModule):
         self.max_len = max_len
         self.d_model = d_model
         self.emb_dim = emb_dim
+        self.label_smoothing = label_smoothing
 
         self.text_vocab = vocab(text_file_path, text_vocab_cache, vocab_freq)
         self.gloss_vocab = vocab(gloss_file_path, gloss_vocab_cache, vocab_freq)
@@ -118,12 +118,15 @@ class TransformerT2G(pl.LightningModule):
         embed = self.trg_emb(trg)
         embed = self.pos_encoding(embed)
         ar_mask = nn.Transformer.generate_square_subsequent_mask(trg.shape[1]).to(self.device)
-
+        
         outs = self.decoder(embed, enc_outs, tgt_mask=ar_mask, tgt_key_padding_mask=~mask)
         
         return outs
     
     def generate(self, enc_outs, max_len=100, sos_token='<sos>', eos_token='<eos>'):
+        '''
+        Greedy search
+        '''
         batch_size = enc_outs.size(0)
         sos_index = self.gloss_vocab[sos_token]
         eos_index = self.gloss_vocab[eos_token]
@@ -141,7 +144,7 @@ class TransformerT2G(pl.LightningModule):
             # Stop decoding when all sequences in the batch have generated the EOS token
             if (trg == eos_index).all(dim=1).any().item():
                 break
-
+        
         return trg
     
     def forward(self, src, src_mask, trg, trg_mask):
@@ -155,11 +158,13 @@ class TransformerT2G(pl.LightningModule):
         
         text_input, text_mask = text[0], text[1]
         gloss_input, gloss_mask = gloss[0], gloss[1]
-
-        outs = self(text_input, text_mask, gloss_input[:, :-1], gloss_mask[:, :-1])
         
+        outs = self(text_input, text_mask, gloss_input[:, :-1], gloss_mask[:, :-1])
+
         # Calculate the cross-entropy loss using right-shifted targets and F.cross_entropy
-        loss = F.cross_entropy(outs.reshape(-1, outs.size(-1)), gloss_input[:, 1:].reshape(-1))
+        loss = F.cross_entropy(outs.reshape(-1, outs.size(-1)), 
+                               gloss_input[:, 1:].reshape(-1), 
+                               label_smoothing=self.label_smoothing, ignore_index=self.gloss_vocab["<pad>"])
 
         self.log("train/loss", loss, batch_size=outs.shape[0])
 
@@ -172,32 +177,22 @@ class TransformerT2G(pl.LightningModule):
         gloss_input, gloss_mask = gloss[0], gloss[1]
 
         outs = self(text_input, text_mask, gloss_input[:, :-1], gloss_mask[:, :-1])
+
+        # greedy search
+        enc_outs = self.encode(text_input, text_mask)
+        generated = self.generate(enc_outs, max_len=self.max_len)
+        generated_strings = indices_to_strings(generated, self.gloss_vocab)
+        reference_strings = indices_to_strings(gloss_input, self.gloss_vocab)
         
         # Calculate the cross-entropy loss using right-shifted targets and F.cross_entropy
-        loss = F.cross_entropy(outs.reshape(-1, outs.size(-1)), gloss_input[:, 1:].reshape(-1))
+        loss = F.cross_entropy(outs.reshape(-1, outs.size(-1)), 
+                               gloss_input[:, 1:].reshape(-1), 
+                               label_smoothing=self.label_smoothing, ignore_index=self.gloss_vocab["<pad>"])
+
+        bleu_dict = get_blues(generated_strings, reference_strings, split="valid")
 
         self.log("valid/loss", loss, batch_size=outs.shape[0])
-
-        return {"text": text, "gloss": gloss}
-    
-    def validation_epoch_end(self, outputs):
-        generated_string_list = []
-        reference_string_list = []
-        for out in outputs:
-            text, text_mask = out["text"][0], out["text"][1]
-            gloss, gloss_mask = out["gloss"][0], out["gloss"][1]
-
-            enc_outs = self.encode(text, text_mask)
-            generated = self.generate(enc_outs, max_len=self.max_len)
-
-            generated_strings = indices_to_strings(generated, self.gloss_vocab)
-            generated_string_list += generated_strings
-
-            reference_strings = indices_to_strings(gloss, self.gloss_vocab)
-            reference_string_list += reference_strings
-
-        bleu_scores_dict = get_blues(reference_string_list, generated_string_list)
-        self.log_dict(bleu_scores_dict, logger=True)
+        self.log_dict(bleu_dict, logger=True, batch_size=outs.shape[0])
     
     def configure_optimizers(self):
         opt = torch.optim.AdamW(
