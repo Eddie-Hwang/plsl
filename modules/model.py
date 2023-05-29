@@ -104,7 +104,7 @@ class TransformerT2G(pl.LightningModule):
         # Map tensor to device
         text, gloss, keypoints = map(lambda tensor: tensor.to(self.device), [text, gloss, keypoints])
         text_mask, gloss_mask, keypoints_mask = map(lambda tensor: tensor.to(self.device), [text_mask, gloss_mask, keypoints_mask])
-        
+
         return (text, text_mask), (gloss, gloss_mask), (keypoints, keypoints_mask)
 
     def encode(self, src, mask):
@@ -137,12 +137,13 @@ class TransformerT2G(pl.LightningModule):
         # Autoregressive decoding
         for _ in range(max_len - 1):
             mask = (trg != self.gloss_vocab["<pad>"])
-            outs = self.decode(enc_outs, trg, mask)
+            outs = self.decode(enc_outs, trg, mask) 
+            outs = self.outs(outs)
             next_word = outs.argmax(dim=-1)[:, -1:]  # Get the word with the highest probability
             trg = torch.cat((trg, next_word), dim=1)  # Append the predicted word to the target sequence
 
             # Stop decoding when all sequences in the batch have generated the EOS token
-            if (trg == eos_index).all(dim=1).any().item():
+            if (trg == eos_index).any(dim=1).all().item():
                 break
         
         return trg
@@ -183,7 +184,7 @@ class TransformerT2G(pl.LightningModule):
         generated = self.generate(enc_outs, max_len=self.max_len)
         generated_strings = indices_to_strings(generated, self.gloss_vocab)
         reference_strings = indices_to_strings(gloss_input, self.gloss_vocab)
-        
+
         # Calculate the cross-entropy loss using right-shifted targets and F.cross_entropy
         loss = F.cross_entropy(outs.reshape(-1, outs.size(-1)), 
                                gloss_input[:, 1:].reshape(-1), 
@@ -201,7 +202,7 @@ class TransformerT2G(pl.LightningModule):
             list(self.src_emb.parameters())+
             list(self.trg_emb.parameters())+
             list(self.outs.parameters()), 
-            lr=self.lr
+            lr=self.lr,
         )
         return opt
     
