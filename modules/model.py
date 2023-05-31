@@ -4,11 +4,11 @@ import torch.nn as nn
 from modules.utils import *
 from modules.positional import PositionalEncoding
 from modules.data import get_vocab, strings_to_indices, indices_to_strings
+import modules.external_metrics_sacrebleu as external_metrics_sacrebleu
 from torch.nn.utils.rnn import pad_sequence
 import torch.nn.functional as F
 import os
 import numpy as np
-import evaluate
 from einops import rearrange
 
 
@@ -28,13 +28,24 @@ def create_mask(seq_lengths, device="cpu"):
     return mask.bool()
 
 
-def get_blues(generated_string_list, reference_string_list, split="train"):
-    metric = evaluate.load("sacrebleu")
-    results = metric.compute(predictions=generated_string_list, references=reference_string_list)
-    bleu_score_dict = {}
-    for i, score in enumerate(results["precisions"]):
-        bleu_score_dict[f"{split}/bleu-{i+1}"] = score
-    return bleu_score_dict
+
+def get_bleus(references, hypotheses, split="train"):
+    """
+    Raw corpus BLEU from sacrebleu (without tokenization)
+
+    :param hypotheses: list of hypotheses (strings)
+    :param references: list of references (strings)
+    :return:
+    """
+    bleu_scores = external_metrics_sacrebleu.raw_corpus_bleu(
+        sys_stream=hypotheses, ref_streams=[references]
+    ).scores
+    scores = {}
+    for n in range(len(bleu_scores)):
+        scores[f"{split}/bleu" + str(n + 1)] = bleu_scores[n]
+    return scores
+
+
 
 class TransformerT2G(pl.LightningModule):
     def __init__(
@@ -190,7 +201,7 @@ class TransformerT2G(pl.LightningModule):
                                gloss_input[:, 1:].reshape(-1), 
                                label_smoothing=self.label_smoothing, ignore_index=self.gloss_vocab["<pad>"])
 
-        bleu_dict = get_blues(generated_strings, reference_strings, split="valid")
+        bleu_dict = get_bleus(generated_strings, reference_strings, split="valid")
 
         self.log("valid/loss", loss, batch_size=outs.shape[0])
         self.log_dict(bleu_dict, logger=True, batch_size=outs.shape[0])
@@ -281,5 +292,5 @@ class TransformerP2T(TransformerT2G):
             reference_strings = indices_to_strings(text, self.text_vocab)
             reference_string_list += reference_strings
 
-        bleu_scores_dict = get_blues(reference_string_list, generated_string_list)
+        bleu_scores_dict = get_bleus(reference_string_list, generated_string_list)
         self.log_dict(bleu_scores_dict, logger=True)
