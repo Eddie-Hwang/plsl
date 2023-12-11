@@ -1,12 +1,36 @@
+import os
 import json
-from collections import Counter
+import torch
 import importlib
+from collections import Counter
+from tokenizers import SentencePieceBPETokenizer
+from tokenizers.normalizers import NFKC, Sequence, Strip
+from tokenizers.processors import TemplateProcessing
+from modules import external_metrics_sacrebleu
+from modules import mscoco_rouge
 
 
 def instantiate_from_config(config):
     if not 'target' in config:
         raise KeyError('Expected key "target" to instatiate.')
     return get_obj_from_str(config["target"])(**config.get("params", dict()))
+
+
+def sliding_window(tensor, window_size, overlap_size):
+    # tensor: [batch_size, n_frames, n_dim]
+    # Get step size
+    step_size = window_size - overlap_size
+
+    # Apply sliding window
+    windows = tensor.unfold(1, window_size, step_size)
+
+    return windows
+
+
+def create_mask(seq_lengths, device="cpu"):
+    max_len = max(seq_lengths)
+    mask = torch.arange(max_len, device=device)[None, :] < torch.tensor(seq_lengths, device=device)[:, None]
+    return mask.to(torch.bool)
 
 
 def get_obj_from_str(string, reload=False):
@@ -100,3 +124,58 @@ def indices_to_strings(indices_list, vocab, sos_token='<sos>', eos_token='<eos>'
         string = ' '.join(tokens)
         strings.append(string)
     return strings
+
+
+def init_tokenizer(text_corpus, gloss_corpus, min_freq, tokenizer_path):
+    tokenizer = SentencePieceBPETokenizer()
+
+    # Set up a normalizer
+    # normalizer = Sequence([BertNormalizer(clean_text=True, handle_chinese_chars=False, lowercase=True), NFKC()])
+    normalizer = Sequence([Strip(), NFKC()])
+    tokenizer._tokenizer.normalizer = normalizer
+    
+    vocab_filename = os.path.join(tokenizer_path, "vocab.json")
+    merges_filename = os.path.join(tokenizer_path, "merges.txt")
+
+    if not(os.path.exists(vocab_filename)):
+        if gloss_corpus is not None: # Shared vocab
+            _file = [text_corpus, gloss_corpus]
+        else:
+            _file = [text_corpus]
+        tokenizer.train(files=_file, vocab_size=32000, min_frequency=min_freq, special_tokens=["<unk>", "<s>", "<pad>", "</s>"])
+        tokenizer.save_model(tokenizer_path)
+
+    # Load tokenizer
+    tokenizer = tokenizer.from_file(vocab_filename=vocab_filename, merges_filename=merges_filename)
+    tokenizer._tokenizer.add_special_tokens(["<s>", "<pad>", "</s>"])
+
+    # Post processing
+    tokenizer.post_processor = TemplateProcessing(
+        single="<s> $A </s>",
+        # pair="<bos> $A <eos> $B:1 <eos>:1",
+        special_tokens=[
+            ("<s>", tokenizer.token_to_id("<s>")),
+            ("</s>", tokenizer.token_to_id("</s>")),
+        ],
+    )
+    
+    return tokenizer
+
+
+def evaluate_results(predictions, references, tokenizer=None, split="train"):
+    log_dicts = {}
+    
+    bleu_scores = external_metrics_sacrebleu.raw_corpus_bleu(
+        sys_stream=predictions, ref_streams=[references]
+    ).scores
+    for n in range(len(bleu_scores)):
+        log_dicts[f"{split}/bleu" + str(n + 1)] = bleu_scores[n]
+
+    rouge_score = 0
+    n_seq = len(predictions)
+    for h, r in zip(predictions, references):
+        rouge_score += mscoco_rouge.calc_score(hypotheses=[h], references=[r]) / n_seq
+
+    log_dicts[f"{split}/rouge"] = rouge_score * 100
+    
+    return log_dicts

@@ -1,0 +1,70 @@
+model:
+  target: modules.hf_models.SignToText
+  params: 
+    lr: 2.0e-4
+    monitor: valid/bleu4
+    max_len: 64
+    d_model: 768
+    emb_dim: 512
+    label_smoothing: 0.1
+    nhead: 12
+    dim_feedforward: 2048
+    dropout: 0.1
+    activation: gelu
+    n_layers: 3
+    beam_size: 8
+    text_corpus: /data/sl_datasets/phoenix14t/data/cache/phoenix_train_text_corpus.txt
+    gloss_corpus: /data/sl_datasets/phoenix14t/data/cache/phoenix_train_gloss_corpus.txt
+    min_freq: 1
+    tokenizer_path: /data/sl_datasets/phoenix14t/data/cache/
+    repetition_penalty: 2.0
+    temperature: 0.8
+    pos_encoding: absolute
+    scheduler_config:
+      target: modules.lr_scheduler.LambdaLinearScheduler
+      params:
+        warm_up_steps:
+        - 5000
+        cycle_lengths:
+        - 10000000000000
+        f_start:
+        - 1.0e-06
+        f_max:
+        - 1.0
+        f_min:
+        - 1.0
+data:
+  target: modules.datamodule.DataModuleFromConfig
+  params:
+    batch_size: 32
+    num_workers: 8
+    train:
+      target: modules.lmdb.DatasetForLMBD
+      params:
+        db_path_list: 
+        - /data/sl_datasets/phoenix14t/PHOENIX-2014-T.train.sw0.lmdb
+    validation:
+      target: modules.lmdb.DatasetForLMBD
+      params:
+        db_path_list: 
+        - /data/sl_datasets/phoenix14t/PHOENIX-2014-T.dev.sw0.lmdb
+    test:
+      target: modules.lmdb.DatasetForLMBD
+      params:
+        db_path_list: 
+        - /data/sl_datasets/phoenix14t/PHOENIX-2014-T.test.sw0.lmdb
+lightning:
+  callback:
+    learning_rate_logger:
+      target: pytorch_lightning.callbacks.LearningRateMonitor
+      params:
+        logging_interval: step
+  trainer:
+    accumulate_grad_batch: 1
+    accelerator: gpu
+    devices:
+    - 2
+    max_epochs: 501
+    overfit_batches: 0.0
+    gradient_clip_val: 0.5
+    precision: 16

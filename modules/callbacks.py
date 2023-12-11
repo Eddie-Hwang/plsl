@@ -15,10 +15,6 @@ class T2GCallback(Callback):
         return
     
     
-
-    
-
-
 # Do not modify
 class SetupCallback(Callback):
     def __init__(self, resume, now, logdir, ckptdir, cfgdir, config, lightning_config):

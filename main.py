@@ -16,7 +16,6 @@ from modules.utils import instantiate_from_config
 from modules.callbacks import SetupCallback
 
 
-
 def get_parser(**parser_kwargs):
     def str2bool(v):
         if isinstance(v, bool):
@@ -44,10 +43,15 @@ def get_parser(**parser_kwargs):
         nargs='?',
     )
     parser.add_argument(
+        "--test",
+        type=bool,
+        default=False
+    )
+    parser.add_argument(
         '-s',
         '--seed',
         type=int,
-        default=23,
+        default=1234,
         help='seed for seed_everything'
     )
     parser.add_argument(
@@ -92,6 +96,11 @@ def get_parser(**parser_kwargs):
         type=bool,
         default=True
     )
+    parser.add_argument(
+        "--ckpt",
+        type=str,
+        default="last.ckpt"
+    )
     return parser
 
 
@@ -104,11 +113,8 @@ def nondefault_trainer_args(opt):
 
 if __name__=='__main__':
     now = datetime.datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
-
     sys.path.append(os.getcwd())
-    
     parser = get_parser()
-    
     opt, unknown = parser.parse_known_args()
     
     if opt.name and opt.resume:
@@ -118,14 +124,14 @@ if __name__=='__main__':
             "use -n/--name in combination with --resume_from_checkpoint"
         )
     
-    if opt.resume:
+    ckpt = None
+    if opt.resume or opt.test:
         if not os.path.exists(opt.resume):
-            raise ValueError(f"Cannot fine {opt.resume}")
+            raise ValueError(f"Cannot find {opt.resume}")
         else:
             logdir = opt.resume.rstrip("/")
-            ckpt = os.path.join(logdir, "checkpoints", "last.ckpt")
-        
-        opt.resume_from_checkpoint = ckpt
+            ckpt = os.path.join(logdir, "checkpoints", opt.ckpt)
+        # opt.resume_from_checkpoint = ckpt
         base_configs = sorted(glob.glob(os.path.join(logdir, "configs/*.yaml")))
         opt.config = base_configs + opt.config
         nowname = logdir.split("/")[-1]
@@ -172,7 +178,7 @@ if __name__=='__main__':
 
     # update learning rate
     batch_size = config.data.params.batch_size
-    base_lr_rate = config.model.params.base_learning_rate
+    base_lr_rate = config.model.params.lr
     
     # TODO: scale_lr set relatively high value and this should need to be fixed
     if opt.scale_lr:
@@ -215,18 +221,22 @@ if __name__=='__main__':
         
         trainer_opt.callbacks = [instantiate_from_config(lightning_config.callback[callback]) for callback in lightning_config.callback.keys()]
         
-        trainer_opt.callbacks.append(ModelCheckpoint(dirpath=ckptdir, filename="{epoch:06}", 
-                                            monitor=model.monitor, save_top_k=3))
+        trainer_opt.callbacks.append(ModelCheckpoint(dirpath=ckptdir, filename="epoch={epoch:05}-step={step:07}-bleu4={valid/bleu4:.2f}", 
+                                                monitor=model.monitor, auto_insert_metric_name=False, 
+                                                save_top_k=10, mode="max"))
+        
+        trainer_opt.callbacks.append(EarlyStopping(monitor=model.monitor, verbose=True, patience=100, mode="max"))
         
         trainer_opt.callbacks.append(SetupCallback(resume=opt.resume, now=now, logdir=logdir, ckptdir=ckptdir, 
                                         cfgdir=cfgdir, config=config, lightning_config=lightning_config))
         
         # opt.callbacks.append(EarlyStopping(monitor=model.monitor, verbose=True, patience=50))
         
-    # lightning trainer
+    # Lightning trainer
     trainer = Trainer.from_argparse_args(trainer_opt)
     
     if opt.train:
-        trainer.fit(model, data)
-    if not opt.no_test:
-        trainer.test(model, data)
+        trainer.fit(model, data, ckpt_path=ckpt)
+    
+    if opt.test:
+        trainer.test(model, data, ckpt_path=ckpt)
